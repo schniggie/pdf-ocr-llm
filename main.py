@@ -218,7 +218,8 @@ def launch_api(args) -> None:
         app,
         host=args.host,
         port=args.port,
-        log_level=args.log_level.lower()
+        log_level=args.log_level.lower(),
+        timeout_keep_alive=3600  # 1 hour timeout for long-running OCR requests
     )
 
 
@@ -226,12 +227,13 @@ def _run_api_process(host: str, port: int, log_level: str) -> None:
     """Helper function to run API in a separate process."""
     import uvicorn
     from src.api.app import app
-    
+
     uvicorn.run(
         app,
         host=host,
         port=port,
-        log_level=log_level.lower()
+        log_level=log_level.lower(),
+        timeout_keep_alive=3600  # 1 hour timeout for long-running OCR requests
     )
 
 
