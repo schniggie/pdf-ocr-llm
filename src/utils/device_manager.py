@@ -56,13 +56,15 @@ class DeviceManager:
             Device map string ('auto', 'cuda:0', 'mps', or 'cpu')
         """
         if self.use_multi_gpu and self.available_devices['cuda_device_count'] > 1:
-            return 'auto'
+            out = 'auto'
         elif self.available_devices['cuda_available']:
-            return 'cuda:0'
+            out = 'cuda:0'
         elif self.available_devices['mps_available']:
-            return 'mps'
+            out = 'mps'
         else:
-            return 'cpu'
+            out = 'cpu'
+            logger.warning("DeviceManager: device_map=cpu (no CUDA or MPS GPU available)")
+        return out
     
     def get_device(self) -> torch.device:
         """
@@ -72,11 +74,25 @@ class DeviceManager:
             PyTorch device object (cuda, mps, or cpu)
         """
         if self.available_devices['cuda_available']:
-            return torch.device('cuda:0')
+            dev = torch.device('cuda:0')
+            logger.debug(f"DeviceManager: get_device() -> {dev}")
         elif self.available_devices['mps_available']:
-            return torch.device('mps')
+            dev = torch.device('mps')
+            logger.debug(f"DeviceManager: get_device() -> {dev}")
+        else:
+            dev = torch.device('cpu')
+            logger.warning("DeviceManager: get_device() -> cpu (no CUDA or MPS GPU available; inference will be slow)")
+        return dev
 
-        return torch.device('cpu')
+    def log_inference_device(self) -> None:
+        """Log current device choice for inference; warn if using CPU."""
+        dev = self.get_device()
+        if dev.type == 'cuda':
+            logger.info(f"Inference device: {dev} ({torch.cuda.get_device_name(0)})")
+        elif dev.type == 'mps':
+            logger.info("Inference device: MPS (Apple Silicon)")
+        else:
+            logger.warning("Inference device: CPU — expect very slow inference. Check CUDA/GPU drivers.")
     
     def get_model_kwargs(self) -> Dict[str, Any]:
         """
