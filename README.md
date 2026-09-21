@@ -5,14 +5,17 @@ A professional PDF OCR system that leverages state-of-the-art vision-language mo
 ## Features
 
 - **State-of-the-art Models**: Multiple vision-language model families
-  - Qwen 3 VL: 4B, 8B, 30B, 235B (Latest)
-  - Qwen 2.5 VL: 3B, 7B, 32B, 72B
-  - InternVL 3.5: 1B, 2B, 4B, 8B, 14B, 30B, 38B, 241B
-- **Web UI**: User-friendly Gradio interface with batch processing
+  - **Qwen 3 VL**: 4B, 8B, 30B, 235B (general-purpose OCR, markdown output)
+  - **InternVL 3.5 Instruct**: 1B, 2B, 4B, 8B, 14B, 30B, 38B, 241B (dynamic tiling, markdown)
+  - **OCRFlux-3B** (ChatDOC): Qwen2.5-VL based, document-to-markdown; output as structured JSON array per page
+  - **GLM-OCR**: 0.9B (dedicated document OCR; 1 image per call; text/formula/table + JSON info extraction)
+- **Web UI**: Gradio with **PDF Processing**, **Batch PDF**, **Image Processing**, and **Extract Info** tabs
 - **REST API**: FastAPI backend for programmatic access
 - **CLI**: Command-line interface for automation
-- **Batch Processing**: Process multiple PDFs with progress tracking and ZIP download
-- **Markdown Output**: Clean formatting without code fences
+- **Batch Processing**: Multiple PDFs with progress tracking and ZIP download
+- **Extract Info**: Upload 1 PDF (all pages) or multiple images; GLM-OCR runs 1 image per call; compare view (preview left, JSON array right); strict JSON-schema prompts (e.g. ID cards, forms)
+- **Output Formats**: `.md` (VLMs), `.txt` (GLM-OCR OCR), `.json` (OCRFlux full doc or Extract Info)
+- **Per-model generation params**: Temperature/top_p/max tokens in UI adapt by model (e.g. GLM-OCR shows only max tokens)
 - **Custom Prompts**: Flexible prompt engineering for specific tasks
 - **Multi-GPU Support**: Automatic device distribution for large models (NVIDIA)
 - **Apple Silicon Support**: Native GPU acceleration on M1/M2/M3 Macs via MPS
@@ -44,7 +47,7 @@ python main.py ui --share # With public link
 python main.py api       # Just the API
 
 # Or use CLI for direct processing
-python main.py process document.pdf --model "Qwen2.5-VL-7B-Instruct" --output result.md
+python main.py process document.pdf --model "Qwen3-VL-4B-Instruct" --output result.md
 
 # List all available models
 python main.py list-models
@@ -123,11 +126,11 @@ The project uses a YAML configuration file (`config.yaml`) to manage models and 
 Example configuration structure:
 ```yaml
 models:
-  qwen25vl:
-    - name: "Qwen2.5-VL-7B-Instruct"
-      model_id: "Qwen/Qwen2.5-VL-7B-Instruct"
-      type: "qwen25vl"
-      
+  qwen3vl:
+    - name: "Qwen3-VL-4B-Instruct"
+      model_id: "Qwen/Qwen3-VL-4B-Instruct"
+      type: "qwen3vl"
+
 device:
   use_multi_gpu: true
   device_map: "auto"
@@ -171,14 +174,15 @@ Then open your browser to `http://localhost:7860`
 - `--share` - Create public share link
 
 **Features:**
-- Upload and process single PDFs
-- Batch process multiple PDFs with ZIP download
-- Upload and process images  
-- Select models from dropdown
+- **PDF Processing**: Single PDF, custom prompt, download as `.md`, `.txt` (GLM-OCR), or `.json` (OCRFlux)
+- **Batch PDF Processing**: Multiple PDFs, ZIP download
+- **Image Processing**: Single image with same model and prompt options
+- **Extract Info**: Upload **1 PDF** (all pages) or **multiple images**; GLM-OCR only, 1 image per call; paste a JSON-schema prompt (e.g. ID card, invoice); get a single JSON array (one object per page/image); **compare view**: preview gallery left, extracted JSON right; download as `.json`
+- Select models from dropdown (Qwen3-VL, InternVL 3.5, OCRFlux-3B, GLM-OCR)
+- **Generation parameters** in the first two tabs update per model (e.g. GLM-OCR shows only max tokens)
 - Custom prompts support
-- Download results as markdown files or ZIP archives
+- Download as `.md`, `.txt` (GLM-OCR), or `.json` (OCRFlux, Extract Info)
 - Real-time progress tracking for batch processing
-- Clean markdown output without code fences
 
 ### REST API Only (FastAPI)
 
@@ -190,35 +194,99 @@ python main.py api
 
 API will be available at `http://localhost:8000`
 
-**Options:**
-- `--host HOST` - Server host (default: 0.0.0.0)
-- `--port PORT` - Server port (default: 8000)
+**Options:** `--host HOST` (default: 0.0.0.0), `--port PORT` (default: 8000)
 
-**Endpoints:**
+#### Endpoints
 
-- `GET /models` - List available models
-- `POST /process/pdf` - Process a PDF file
-- `POST /process/image` - Process an image file
-- `GET /health` - Health check
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | API info and list of endpoints |
+| `GET` | `/models` | List available models (names and config) |
+| `POST` | `/process/pdf` | Upload a PDF, get extracted text |
+| `POST` | `/process/image` | Upload an image, get extracted text |
+| `GET` | `/health` | Health check |
 
-**Example API Usage:**
+#### Process PDF — `POST /process/pdf`
+
+- **Request:** `multipart/form-data`
+  - `file` (required): PDF file
+  - `model_name` (required): Exact model name from `/models` (e.g. `Qwen3-VL-4B-Instruct`, `GLM-OCR`, `InternVL3.5-8B-Instruct`)
+  - `prompt` (optional): Custom OCR prompt; omit for default
+- **Response (200):** JSON
+  - `success`: `true`
+  - `model`: model name used
+  - `num_pages`: number of pages
+  - `markdown`: extracted text (markdown for VLMs, plain text for GLM-OCR, JSON string for OCRFlux)
+  - `processing_time`: (if present) seconds
+
+#### Process image — `POST /process/image`
+
+- **Request:** `multipart/form-data`
+  - `file` (required): Image file (e.g. PNG, JPEG)
+  - `model_name` (required): Model name from `/models`
+  - `prompt` (optional): Custom prompt
+- **Response (200):** JSON
+  - `success`, `model`, `markdown`, `text_length`
+
+#### Example: cURL
+
+```bash
+# List models
+curl http://localhost:8000/models
+
+# Process a PDF
+curl -X POST http://localhost:8000/process/pdf \
+  -F "file=@document.pdf" \
+  -F "model_name=Qwen3-VL-4B-Instruct"
+
+# With custom prompt
+curl -X POST http://localhost:8000/process/pdf \
+  -F "file=@document.pdf" \
+  -F "model_name=GLM-OCR" \
+  -F "prompt=Text Recognition:"
+
+# Process an image
+curl -X POST http://localhost:8000/process/image \
+  -F "file=@page.png" \
+  -F "model_name=InternVL3.5-8B-Instruct"
+```
+
+#### Example: Python
 
 ```python
 import requests
 
+BASE = "http://localhost:8000"
+
 # List models
-response = requests.get("http://localhost:8000/models")
-print(response.json())
+r = requests.get(f"{BASE}/models")
+print(r.json())  # {"models": [{"name": "Qwen3-VL-4B-Instruct", ...}, ...]}
 
 # Process PDF
 with open("document.pdf", "rb") as f:
-    files = {"file": f}
-    data = {"model_name": "Qwen2.5-VL-7B-Instruct"}
-    response = requests.post("http://localhost:8000/process/pdf", files=files, data=data)
-    print(response.json()["markdown"])
+    r = requests.post(
+        f"{BASE}/process/pdf",
+        files={"file": ("document.pdf", f, "application/pdf")},
+        data={"model_name": "Qwen3-VL-4B-Instruct"}
+    )
+data = r.json()
+print(data["markdown"])   # extracted text
+print(data["num_pages"])
+
+# Process image with optional prompt
+with open("scan.png", "rb") as f:
+    r = requests.post(
+        f"{BASE}/process/image",
+        files={"file": ("scan.png", f, "image/png")},
+        data={
+            "model_name": "GLM-OCR",
+            "prompt": "Text Recognition:"  # or "Formula Recognition:" / "Table Recognition:"
+        }
+    )
+print(r.json()["markdown"])
 ```
 
-**Interactive API Docs:** Visit `http://localhost:8000/docs` for Swagger UI
+**Interactive API docs:** Open `http://localhost:8000/docs` (Swagger UI) to try the endpoints from the browser.
 
 ### Command Line Interface
 
@@ -233,45 +301,45 @@ python main.py list-models
 
 Extract text from a PDF file to Markdown:
 ```bash
-python main.py process input.pdf --model "Qwen2.5-VL-7B-Instruct" --output output.md
+python main.py process input.pdf --model "Qwen3-VL-4B-Instruct" --output output.md
 ```
 
 Save intermediate images:
 ```bash
-python main.py process input.pdf --model "Qwen2.5-VL-7B-Instruct" --save-images --images-dir ./images
+python main.py process input.pdf --model "Qwen3-VL-4B-Instruct" --save-images --images-dir ./images
 ```
 
 ### Process a Single Image
 
 Extract text from an image file to Markdown:
 ```bash
-python main.py process image.png --model "Qwen2.5-VL-7B-Instruct" --output output.md
+python main.py process image.png --model "Qwen3-VL-4B-Instruct" --output output.md
 ```
 
 ### Batch Processing
 
 Process multiple files at once:
 ```bash
-python main.py batch --model "Qwen2.5-VL-7B-Instruct" --input-dir ./pdfs --output-dir ./outputs
+python main.py batch --model "Qwen3-VL-4B-Instruct" --input-dir ./pdfs --output-dir ./outputs
 ```
 
 Process specific files:
 ```bash
-python main.py batch --model "Qwen2.5-VL-7B-Instruct" --input-files file1.pdf file2.pdf --output-dir ./outputs
+python main.py batch --model "Qwen3-VL-4B-Instruct" --input-files file1.pdf file2.pdf --output-dir ./outputs
 ```
 
 ### Custom Prompts
 
 Use a custom prompt for better context:
 ```bash
-python main.py process invoice.pdf --model "Qwen2.5-VL-7B-Instruct" --prompt "Extract all text from this invoice, preserving table structure"
+python main.py process invoice.pdf --model "Qwen3-VL-4B-Instruct" --prompt "Extract all text from this invoice, preserving table structure"
 ```
 
 ### Show Device Information
 
 Display available GPUs:
 ```bash
-python main.py process input.pdf --model "Qwen2.5-VL-7B-Instruct" --show-device-info
+python main.py process input.pdf --model "Qwen3-VL-4B-Instruct" --show-device-info
 ```
 
 ## Project Structure
@@ -281,19 +349,25 @@ pdf-ocr-llm/
 ├── config.yaml              # Configuration file
 ├── main.py                  # Main entry point
 ├── requirements.txt         # Python dependencies
-├── README.md               # This file
+├── README.md                # This file
 └── src/
     ├── config/
     │   └── config_manager.py    # Configuration management
     ├── models/
     │   ├── base_model.py        # Abstract base class
-    │   ├── qwen25vl_model.py    # Qwen 2.5 VL implementation
-    │   ├── internvl_model.py    # InternVL 3.5 implementation
+    │   ├── qwen3vl_model.py     # Qwen 3 VL implementation
+    │   ├── internvl_model.py    # InternVL 3.5 Instruct implementation
+    │   ├── ocrflux_model.py     # OCRFlux-3B (ChatDOC, markdown/JSON)
+    │   ├── glm_ocr_model.py     # GLM-OCR (1 image per call; document + info extraction)
     │   └── model_factory.py     # Model factory pattern
     ├── processors/
     │   └── pdf_processor.py     # PDF processing utilities
     ├── pipeline/
     │   └── ocr_pipeline.py      # Main OCR pipeline
+    ├── ui/
+    │   └── app.py               # Gradio Web UI
+    ├── api/
+    │   └── app.py               # FastAPI REST API
     └── utils/
         └── device_manager.py    # Device management (GPU)
 ```
@@ -320,49 +394,62 @@ The project follows a professional, modular architecture:
 
 ## Models
 
-The project supports multiple vision-language model families optimized for OCR and document understanding:
+The project supports multiple vision-language model families for OCR and document understanding:
 
-### Qwen 3 VL (Alibaba Cloud) - Latest
+### Qwen 3 VL (Alibaba Cloud)
 
-Next-generation vision-language models with cutting-edge OCR performance:
+General-purpose vision-language models with strong OCR and markdown output:
 
 - **Qwen3-VL-4B-Instruct** - 4B parameters, highly efficient
 - **Qwen3-VL-8B-Instruct** - 8B parameters, excellent balance
 - **Qwen3-VL-30B-A3B-Instruct** - 30B parameters, very powerful
 - **Qwen3-VL-235B-A22B-Instruct** - 235B parameters, state-of-the-art
 
-> 📚 **Reference**: [Qwen 3 VL Collection on HuggingFace](https://huggingface.co/collections/Qwen/qwen3-vl-68d2a7c1b8a8afce4ebd2dbe)
+> 📚 **Reference**: [Qwen 3 VL on HuggingFace](https://huggingface.co/collections/Qwen/qwen3-vl-68d2a7c1b8a8afce4ebd2dbe)
 
-### Qwen 2.5 VL (Alibaba Cloud)
+### InternVL 3.5 Instruct (OpenGVLab)
 
-Previous generation with proven reliability:
-
-- **Qwen2.5-VL-3B-Instruct** - 3B parameters, efficient and fast
-- **Qwen2.5-VL-7B-Instruct** - 7B parameters, balanced performance
-- **Qwen2.5-VL-32B-Instruct** - 32B parameters, high quality
-- **Qwen2.5-VL-72B-Instruct** - 72B parameters, best quality
-
-### InternVL 3.5 (OpenGVLab)
-
-Versatile multimodal models with dynamic image preprocessing and tiling:
+Versatile multimodal models with dynamic image preprocessing and tiling; output is markdown:
 
 - **InternVL3.5-1B-Instruct** - 1B parameters, ultra-lightweight
 - **InternVL3.5-2B-Instruct** - 2B parameters, very efficient
-- **InternVL3.5-4B-Instruct** - 4B parameters, balanced small model
+- **InternVL3.5-4B-Instruct** - 4B parameters, balanced
 - **InternVL3.5-8B-Instruct** - 8B parameters, strong mid-size
 - **InternVL3.5-14B-Instruct** - 14B parameters, high performance
-- **InternVL3.5-30B-A3B-Instruct** - 30B parameters, very powerful
-- **InternVL3.5-38B-Instruct** - 38B parameters, flagship model
-- **InternVL3.5-241B-A28B-Instruct** - 241B parameters, ultimate quality
+- **InternVL3.5-30B-A3B-Instruct** - 30B parameters (31B), very powerful
+- **InternVL3.5-38B-Instruct** - 38B parameters, flagship
+- **InternVL3.5-241B-A28B-Instruct** - 241B parameters, maximum quality
 
-> **Note**: InternVL models use dynamic image tiling for better quality on high-resolution documents.
+> **Note**: InternVL uses the GitHub/Instruct format (`trust_remote_code`) and dynamic tiling for high-resolution documents.  
+> 📚 **Reference**: [InternVL3.5-1B-Instruct](https://huggingface.co/OpenGVLab/InternVL3_5-1B-Instruct)
 
-**Model Selection Tips:**
-- **For speed**: Use 1B-4B models (InternVL3.5-1B, Qwen3-VL-4B)
-- **For quality**: Use 7B-14B models (Qwen3-VL-8B, InternVL3.5-8B)
-- **For best results**: Use 30B+ models (Qwen3-VL-30B, Qwen3-VL-235B)
-- **For high-resolution documents**: InternVL models (dynamic tiling)
-- **For general OCR (recommended)**: Qwen 3 VL models (latest, best performance)
+### GLM-OCR (Z.ai)
+
+Dedicated document OCR model (0.9B); not a general-purpose VLM. Output is plain text by default. Supports:
+
+- **Document parsing**: `"Text Recognition:"`, `"Formula Recognition:"`, `"Table Recognition:"`
+- **Information extraction**: Prompts must follow a strict JSON schema (e.g. ID card fields, invoice fields). Use the **Extract Info from PDF** tab in the UI.
+
+When using GLM-OCR for standard OCR, downloads use `.txt`; for **Extract Info**, output is a JSON array (one object per image). GLM-OCR accepts **one image per call**; the app batches by running it once per PDF page or per uploaded image.
+
+> 📚 **Reference**: [GLM-OCR on HuggingFace](https://huggingface.co/zai-org/GLM-OCR)
+
+### OCRFlux-3B (ChatDOC)
+
+Document OCR model (3B, Qwen2.5-VL based); outputs clean markdown. The pipeline returns a **JSON array** (one object per page with fields such as `natural_text`, `primary_language`, `is_table`). Download uses `.json`.
+
+> 📚 **Reference**: [OCRFlux-3B on HuggingFace](https://huggingface.co/ChatDOC/OCRFlux-3B)
+
+**Note:** Qwen 2.5 VL (3B, 7B, 32B, 72B) has been removed in favor of Qwen 3 VL and the current model set. Use `config.yaml` to adjust which models are available.
+
+### Model selection tips
+
+- **Speed**: InternVL3.5-1B, Qwen3-VL-4B, OCRFlux-3B, or GLM-OCR
+- **Quality (general OCR)**: Qwen3-VL-8B or InternVL3.5-8B
+- **Document-to-markdown (JSON per page)**: OCRFlux-3B
+- **Best quality**: Qwen3-VL-30B / 235B or InternVL3.5-38B / 241B
+- **High-resolution / tiling**: InternVL 3.5
+- **Structured extraction (forms, ID cards)**: GLM-OCR in **Extract Info** (1 PDF or multiple images; 1 image per call)
 
 ## Multi-GPU Support
 
@@ -415,7 +502,7 @@ python main.py serve
 **Device Detection**: The system automatically detects and uses MPS when available. Check device status:
 
 ```bash
-python main.py process document.pdf --model "Qwen2.5-VL-7B-Instruct" --show-device-info
+python main.py process document.pdf --model "Qwen3-VL-4B-Instruct" --show-device-info
 ```
 
 **Performance Expectations**:
@@ -429,10 +516,10 @@ python main.py process document.pdf --model "Qwen2.5-VL-7B-Instruct" --show-devi
 - Some rare PyTorch operations may fall back to CPU (automatic with `PYTORCH_ENABLE_MPS_FALLBACK=1` already configured)
 
 **Recommended Models for Apple Silicon**:
-- **M1/M2 (8GB)**: Qwen2.5-VL-3B, InternVL3.5-1B/2B
-- **M1/M2 Pro (16GB)**: Qwen2.5-VL-7B, InternVL3.5-4B/8B
-- **M1/M2 Max (32GB+)**: Qwen2.5-VL-7B/32B, InternVL3.5-8B/14B
-- **M1/M2 Ultra (64GB+)**: Qwen2.5-VL-32B/72B, InternVL3.5-14B/38B
+- **M1/M2 (8GB)**: GLM-OCR, OCRFlux-3B, InternVL3.5-1B/2B
+- **M1/M2 Pro (16GB)**: Qwen3-VL-4B, InternVL3.5-4B/8B
+- **M1/M2 Max (32GB+)**: Qwen3-VL-8B, InternVL3.5-8B/14B
+- **M1/M2 Ultra (64GB+)**: Qwen3-VL-8B/30B, InternVL3.5-14B/38B
 
 ## Deployment Options
 

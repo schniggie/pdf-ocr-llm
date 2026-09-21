@@ -25,7 +25,14 @@ class BaseOCRModel(ABC):
     def load_model(self) -> None:
         """Load the model and associated components."""
         pass
-    
+
+    def warmup(self) -> None:
+        """
+        Run a minimal inference to initialize CUDA and avoid slow first real inference.
+        Override in subclasses. Default is no-op.
+        """
+        pass
+
     @abstractmethod
     def process_image(self, image: Image.Image, prompt: str = None) -> str:
         """
@@ -69,6 +76,8 @@ class BaseOCRModel(ABC):
         # Clear GPU cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
     
     def get_model_info(self) -> Dict[str, Any]:
         """

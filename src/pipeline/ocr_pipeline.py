@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional
 from PIL import Image
+import json
+import re
 import logging
 from tqdm import tqdm
 
@@ -91,6 +93,15 @@ class OCRPipeline:
         )
         self.current_model.load_model()
         self.current_model_name = model_name
+
+        # Confirm and log inference device (must be GPU for acceptable speed)
+        self.device_manager.log_inference_device()
+
+        # Warmup: run minimal inference so first real page uses GPU immediately
+        if hasattr(self.current_model, 'warmup') and callable(self.current_model.warmup):
+            logger.info("Running model warmup (one-time CUDA init)...")
+            self.current_model.warmup()
+            logger.info("Warmup complete.")
         
         logger.info(f"Model {model_name} loaded successfully")
     
@@ -104,7 +115,8 @@ class OCRPipeline:
         prompt: str = None,
         temperature: float = None,
         top_p: float = None,
-        max_new_tokens: int = None
+        max_new_tokens: int = None,
+        resize_high_res: bool = True
     ) -> Dict[str, Any]:
         """
         Process a PDF file and extract text using OCR.
@@ -144,10 +156,11 @@ class OCRPipeline:
         if self.current_model is None:
             raise RuntimeError("No model loaded. Please specify a model_name or call load_model() first.")
         
-        logger.info(f"Processing PDF: {pdf_path}")
+        logger.info(f"Processing PDF: {pdf_path} (resize_high_res={resize_high_res})")
         
-        # Convert PDF to images
-        images = self.pdf_processor.pdf_to_images(pdf_path)
+        # Convert PDF to images; optionally resize high-res pages (0 = no resize)
+        max_override = self.pdf_processor.max_image_size if resize_high_res else 0
+        images = self.pdf_processor.pdf_to_images(pdf_path, max_image_size_override=max_override)
         
         # Save images if requested
         if save_images:
@@ -156,12 +169,18 @@ class OCRPipeline:
             self.pdf_processor.save_images(images, images_dir)
         
         # Process images with OCR
-        logger.info(f"Running OCR on {len(images)} page(s)")
+        num_pages = len(images)
+        inference_device = self.device_manager.get_device()
+        logger.info(f"Running OCR on {num_pages} page(s), device={inference_device}")
+        if inference_device.type not in ('cuda', 'mps'):
+            logger.warning("OCR is not using CUDA or MPS — expect very slow processing. Check GPU and drivers.")
         page_texts = []
-        
+
         for idx, image in enumerate(tqdm(images, desc="Processing pages"), start=1):
             try:
+                logger.info(f"Processing page {idx}/{num_pages}...")
                 text = self.current_model.process_image(image, prompt)
+                logger.info(f"Page {idx}/{num_pages} done.")
                 page_texts.append({
                     'page_number': idx,
                     'text': text
@@ -174,8 +193,25 @@ class OCRPipeline:
                     'error': str(e)
                 })
         
-        # Combine all pages in Markdown format
-        full_text = "\n\n".join([f"# Page {page['page_number']}\n\n{page['text']}" for page in page_texts])
+        # Combine pages: markdown headers for VLMs; raw for GLM-OCR; JSON array for OCRFlux (easy to parse)
+        model_config = self.config_manager.get_model_by_name(self.current_model_name)
+        model_type = (model_config or {}).get("type")
+        use_markdown_headers = model_config and model_type not in ("glm_ocr", "ocrflux")
+        if use_markdown_headers:
+            full_text = "\n\n".join([f"# Page {page['page_number']}\n\n{page['text']}" for page in page_texts])
+        elif model_type == "ocrflux":
+            # OCRFlux returns JSON per page (e.g. primary_language, natural_text). Output a single JSON array for easy parsing.
+            pages_list = []
+            for page in page_texts:
+                raw = (page.get("text") or "").strip()
+                raw = re.sub(r"^#\s*Page\s+\d+\s*\n*", "", raw, flags=re.IGNORECASE).strip()
+                try:
+                    pages_list.append(json.loads(raw))
+                except (json.JSONDecodeError, TypeError):
+                    pages_list.append({"page_number": page["page_number"], "natural_text": raw})
+            full_text = json.dumps(pages_list, indent=2, ensure_ascii=False)
+        else:
+            full_text = "\n\n".join([page["text"] for page in page_texts])
         
         # Save output if requested
         if output_path is not None:
@@ -204,7 +240,8 @@ class OCRPipeline:
         prompt: str = None,
         temperature: float = None,
         top_p: float = None,
-        max_new_tokens: int = None
+        max_new_tokens: int = None,
+        resize_high_res: bool = True
     ) -> Dict[str, Any]:
         """
         Process a single image and extract text using OCR.
@@ -217,6 +254,7 @@ class OCRPipeline:
             temperature: Sampling temperature (None = use default)
             top_p: Top-p sampling parameter (None = use default)
             max_new_tokens: Maximum tokens to generate (None = use default)
+            resize_high_res: If True, resize images above threshold (faster); if False, use original resolution
             
         Returns:
             Dictionary containing extracted text and metadata
@@ -242,10 +280,12 @@ class OCRPipeline:
         if self.current_model is None:
             raise RuntimeError("No model loaded. Please specify a model_name or call load_model() first.")
         
-        logger.info(f"Processing image: {image_path}")
+        logger.info(f"Processing image: {image_path} (resize_high_res={resize_high_res})")
         
         # Load image
         image = self.pdf_processor.load_image(image_path)
+        if resize_high_res:
+            image = self.pdf_processor.resize_for_model(image)
         
         # Process image with OCR
         text = self.current_model.process_image(image, prompt)
